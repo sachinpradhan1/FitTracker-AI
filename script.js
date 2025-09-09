@@ -91,6 +91,13 @@ let currentProgram = null;
 let customWorkoutPlan = [];
 let programExerciseIndex = 0;
 let isFollowingProgram = false;
+
+// Enhanced rep validation variables
+let lastRepTime = 0;
+let repValidationFrames = 0;
+let lastAngleMeasurements = [];
+let positionStableFrames = 0;
+let isInValidPosition = false;
 let userStats = {
   xp: 0,
   level: 1,
@@ -640,25 +647,34 @@ function processExercise(landmarks) {
     const shoulder = lm[11];
     const elbow = lm[13];
     const wrist = lm[15];
-
-    // Calculate angle for shoulder press (elbow to shoulder to hip)
     const hip = lm[23];
-    const shoulderAngle = calculateAngle(elbow, shoulder, hip);
 
-    // Also check arm extension (shoulder to elbow to wrist)
-    const armAngle = calculateAngle(shoulder, elbow, wrist);
+    // Calculate arm extension angle (shoulder to elbow to wrist)
+    const armAngle = getSmoothedAngle(shoulder, elbow, wrist);
+    
+    // Validate landmarks are stable and visible
+    if (!areLandmarksStable([shoulder, elbow, wrist])) {
+      return;
+    }
 
-    if (shoulderAngle > 60 && shoulderAngle < 120 && armAngle > 90) {
+    if (armAngle > 120 && armAngle < 170) {
       updateFeedback("Performing Shoulder Press", `Great form! Extension: ${Math.round(armAngle)}°`, "fas fa-angle-up");
     }
 
-    if (armAngle < 90 && direction === "up") {
-      direction = "down";
-    }
-    if (armAngle > 160 && direction === "down") {
-      direction = "up";
-      incrementRep();
-      updateFeedback("Perfect Press!", "Excellent shoulder strength!", "fas fa-check-circle");
+    // Enhanced rep validation for shoulder press
+    if (validateRepMovement(armAngle, 160, 90)) {
+      // Arms extended down (starting position)
+      if (armAngle > 160 && direction === "up") {
+        direction = "down";
+        positionStableFrames = 0;
+      }
+      // Arms pressed up (end position) 
+      if (armAngle < 90 && direction === "down") {
+        direction = "up";
+        incrementRep();
+        updateFeedback("Perfect Press!", "Excellent shoulder strength!", "fas fa-check-circle");
+        resetRepValidation();
+      }
     }
   } else if (currentExercise === "jumpingjack") {
     const leftShoulder = lm[11];
@@ -794,6 +810,67 @@ function calculateAngle(a, b, c) {
   const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
   let angle = Math.abs(radians * 180 / Math.PI);
   return angle > 180 ? 360 - angle : angle;
+}
+
+// Enhanced rep counting validation functions
+function getSmoothedAngle(a, b, c) {
+  const currentAngle = calculateAngle(a, b, c);
+  
+  // Add to measurements array
+  lastAngleMeasurements.push(currentAngle);
+  
+  // Keep only last 10 measurements for smoothing
+  if (lastAngleMeasurements.length > 10) {
+    lastAngleMeasurements.shift();
+  }
+  
+  // Return moving average to reduce noise
+  return lastAngleMeasurements.reduce((sum, angle) => sum + angle, 0) / lastAngleMeasurements.length;
+}
+
+function validateRepMovement(currentAngle, upThreshold, downThreshold) {
+  const currentTime = Date.now();
+  
+  // Enforce minimum time between reps (800ms)
+  if (currentTime - lastRepTime < 800) {
+    return false;
+  }
+  
+  // Check if we're in a valid exercise position
+  const inValidRange = (currentAngle <= upThreshold && currentAngle >= downThreshold);
+  
+  if (inValidRange) {
+    positionStableFrames++;
+    isInValidPosition = true;
+  } else {
+    positionStableFrames = 0;
+    isInValidPosition = false;
+  }
+  
+  // Require 5 consecutive frames of valid position before allowing rep counting
+  if (positionStableFrames >= 5 && isInValidPosition) {
+    return true;
+  }
+  
+  return false;
+}
+
+function areLandmarksStable(landmarks) {
+  // Check if all required landmarks are visible with good confidence
+  for (let landmark of landmarks) {
+    if (!landmark || landmark.visibility < 0.6) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function resetRepValidation() {
+  lastRepTime = Date.now();
+  repValidationFrames = 0;
+  positionStableFrames = 0;
+  isInValidPosition = false;
+  lastAngleMeasurements = [];
 }
 
 function incrementRep() {
@@ -1055,21 +1132,40 @@ function exportWorkoutHistory() {
     return;
   }
   
-  // Create CSV content with proper data handling
+  // Filter out any invalid or incomplete workout data
+  const validWorkouts = workoutHistory.filter(workout => {
+    return workout && 
+           workout.exercise && 
+           workout.exerciseName && 
+           workout.startTime && 
+           typeof workout.reps === 'number' && 
+           typeof workout.calories === 'number' && 
+           typeof workout.duration === 'number' &&
+           workout.reps >= 0 && 
+           workout.calories >= 0 && 
+           workout.duration > 0;
+  });
+  
+  if (validWorkouts.length === 0) {
+    alert('No valid workout data to export.');
+    return;
+  }
+  
+  // Create CSV content with validated data only
   const csvHeaders = 'Date,Time,Exercise,Duration (seconds),Reps,Calories,Form Score,Completed,Target Reps\n';
-  const csvRows = workoutHistory.map(workout => {
+  const csvRows = validWorkouts.map(workout => {
     const date = new Date(workout.startTime);
     const dateStr = date.toLocaleDateString();
     const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     
     // Ensure all data is properly formatted and sanitized
     const exerciseName = (workout.exerciseName || 'Unknown').replace(/,/g, ';');
-    const duration = workout.duration || 0;
-    const reps = workout.reps || 0;
-    const calories = workout.calories || 0;
-    const formScore = workout.formScore || 0;
+    const duration = Math.round(workout.duration) || 0;
+    const reps = Math.round(workout.reps) || 0;
+    const calories = Math.round(workout.calories * 10) / 10 || 0;
+    const formScore = Math.round(workout.formScore) || 0;
     const completed = workout.completed ? 'Yes' : 'No';
-    const targetReps = workout.targetReps || 0;
+    const targetReps = Math.round(workout.targetReps) || 0;
     
     return `${dateStr},${timeStr},${exerciseName},${duration},${reps},${calories},${formScore},${completed},${targetReps}`;
   }).join('\n');
@@ -1092,7 +1188,7 @@ function exportWorkoutHistory() {
     URL.revokeObjectURL(url); // Clean up
   }
   
-  speak('Workout history exported successfully.');
+  speak(`Exported ${validWorkouts.length} valid workouts successfully.`);
 }
 
 function loadUserStats() {
@@ -1699,6 +1795,9 @@ function resetSession() {
   resumeTimeoutId = null;
 
   workoutState = camera ? 'preparing' : 'idle';
+  
+  // Reset enhanced rep validation
+  resetRepValidation();
   
   // Don't reset program if we're following one
   if (!isFollowingProgram) {
