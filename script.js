@@ -62,6 +62,11 @@ const levelFillElement = document.getElementById("level-fill");
 const currentXpElement = document.getElementById("current-xp");
 const nextLevelXpElement = document.getElementById("next-level-xp");
 
+// Welcome page elements
+const welcomePage = document.getElementById("welcome-page");
+const startTrainingBtn = document.getElementById("start-training-btn");
+const viewExercisesBtn = document.getElementById("view-exercises-btn");
+
 // Variables for rep counting
 let repCount = 0;
 let sessionCalories = 0;
@@ -91,6 +96,13 @@ let currentProgram = null;
 let customWorkoutPlan = [];
 let programExerciseIndex = 0;
 let isFollowingProgram = false;
+
+// Enhanced rep validation variables
+let lastRepTime = 0;
+let repValidationFrames = 0;
+let lastAngleMeasurements = [];
+let positionStableFrames = 0;
+let isInValidPosition = false;
 let userStats = {
   xp: 0,
   level: 1,
@@ -108,7 +120,6 @@ const demoVideos = {
   curl: "https://www.youtube.com/embed/ykJmrZ5v0Oo",
   squat: "https://www.youtube.com/embed/aclHkVaku9U",
   pushup: "https://www.youtube.com/embed/IODxDxX7oi4",
-  shoulderpress: "https://www.youtube.com/embed/qEwKCR5JCog",
   jumpingjack: "https://www.youtube.com/embed/c4DAnQ6DtF8",
   lunge: "https://www.youtube.com/embed/QOVaHwm-Q6U",
   plank: "https://www.youtube.com/embed/ASdvN_XEl_c",
@@ -119,8 +130,7 @@ const demoVideos = {
 const exerciseData = {
   curl: { name: "bicep curls", calories: 0.5, type: "reps" },
   squat: { name: "squats", calories: 0.8, type: "reps" },
-  pushup: { name: "push-ups", calories: 0.7, type: "reps" },
-  shoulderpress: { name: "shoulder press", calories: 0.6, type: "reps" },
+  pushup: { name: "push up", calories: 0.7, type: "reps" },
   jumpingjack: { name: "jumping jacks", calories: 0.9, type: "reps" },
   lunge: { name: "lunges", calories: 0.7, type: "reps" },
   plank: { name: "plank hold", calories: 0.3, type: "time" },
@@ -149,7 +159,6 @@ const workoutPrograms = {
       { exercise: "squat", reps: 20 },
       { exercise: "pushup", reps: 15 },
       { exercise: "curl", reps: 15 },
-      { exercise: "shoulderpress", reps: 12 },
       { exercise: "lunge", reps: 16 }
     ],
     icon: "fas fa-dumbbell"
@@ -484,15 +493,6 @@ function checkReadyState(landmarks) {
         feedbackMessage = "Get into a straight-arm plank position.";
       }
       break;
-    case "shoulderpress":
-      const spArmAngle = calculateAngle(lm[11], lm[13], lm[15]);
-      if (spArmAngle > 160) {
-        startPoseCorrect = true;
-        feedbackMessage = "Hold this position with arms down to begin.";
-      } else {
-        feedbackMessage = "Stand with your arms down to begin.";
-      }
-      break;
     case "jumpingjack":
       const jjShoulderAngle = calculateAngle(lm[13], lm[11], lm[23]);
       if (jjShoulderAngle < 45) { // Arms down by side
@@ -636,30 +636,6 @@ function processExercise(landmarks) {
       updateFeedback("Amazing Push-up!", "Perfect chest engagement!", "fas fa-check-circle");
     }
 
-  } else if (currentExercise === "shoulderpress") {
-    const shoulder = lm[11];
-    const elbow = lm[13];
-    const wrist = lm[15];
-
-    // Calculate angle for shoulder press (elbow to shoulder to hip)
-    const hip = lm[23];
-    const shoulderAngle = calculateAngle(elbow, shoulder, hip);
-
-    // Also check arm extension (shoulder to elbow to wrist)
-    const armAngle = calculateAngle(shoulder, elbow, wrist);
-
-    if (shoulderAngle > 60 && shoulderAngle < 120 && armAngle > 90) {
-      updateFeedback("Performing Shoulder Press", `Great form! Extension: ${Math.round(armAngle)}°`, "fas fa-angle-up");
-    }
-
-    if (armAngle < 90 && direction === "up") {
-      direction = "down";
-    }
-    if (armAngle > 160 && direction === "down") {
-      direction = "up";
-      incrementRep();
-      updateFeedback("Perfect Press!", "Excellent shoulder strength!", "fas fa-check-circle");
-    }
   } else if (currentExercise === "jumpingjack") {
     const leftShoulder = lm[11];
     const rightShoulder = lm[12];
@@ -794,6 +770,67 @@ function calculateAngle(a, b, c) {
   const radians = Math.atan2(c.y - b.y, c.x - b.x) - Math.atan2(a.y - b.y, a.x - b.x);
   let angle = Math.abs(radians * 180 / Math.PI);
   return angle > 180 ? 360 - angle : angle;
+}
+
+// Enhanced rep counting validation functions
+function getSmoothedAngle(a, b, c) {
+  const currentAngle = calculateAngle(a, b, c);
+  
+  // Add to measurements array
+  lastAngleMeasurements.push(currentAngle);
+  
+  // Keep only last 10 measurements for smoothing
+  if (lastAngleMeasurements.length > 10) {
+    lastAngleMeasurements.shift();
+  }
+  
+  // Return moving average to reduce noise
+  return lastAngleMeasurements.reduce((sum, angle) => sum + angle, 0) / lastAngleMeasurements.length;
+}
+
+function validateRepMovement(currentAngle, upThreshold, downThreshold) {
+  const currentTime = Date.now();
+  
+  // Enforce minimum time between reps (800ms)
+  if (currentTime - lastRepTime < 800) {
+    return false;
+  }
+  
+  // Check if we're in a valid exercise position
+  const inValidRange = (currentAngle <= upThreshold && currentAngle >= downThreshold);
+  
+  if (inValidRange) {
+    positionStableFrames++;
+    isInValidPosition = true;
+  } else {
+    positionStableFrames = 0;
+    isInValidPosition = false;
+  }
+  
+  // Require 5 consecutive frames of valid position before allowing rep counting
+  if (positionStableFrames >= 5 && isInValidPosition) {
+    return true;
+  }
+  
+  return false;
+}
+
+function areLandmarksStable(landmarks) {
+  // Check if all required landmarks are visible with good confidence
+  for (let landmark of landmarks) {
+    if (!landmark || landmark.visibility < 0.6) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function resetRepValidation() {
+  lastRepTime = Date.now();
+  repValidationFrames = 0;
+  positionStableFrames = 0;
+  isInValidPosition = false;
+  lastAngleMeasurements = [];
 }
 
 function incrementRep() {
@@ -1055,21 +1092,40 @@ function exportWorkoutHistory() {
     return;
   }
   
-  // Create CSV content with proper data handling
+  // Filter out any invalid or incomplete workout data
+  const validWorkouts = workoutHistory.filter(workout => {
+    return workout && 
+           workout.exercise && 
+           workout.exerciseName && 
+           workout.startTime && 
+           typeof workout.reps === 'number' && 
+           typeof workout.calories === 'number' && 
+           typeof workout.duration === 'number' &&
+           workout.reps >= 0 && 
+           workout.calories >= 0 && 
+           workout.duration > 0;
+  });
+  
+  if (validWorkouts.length === 0) {
+    alert('No valid workout data to export.');
+    return;
+  }
+  
+  // Create CSV content with validated data only
   const csvHeaders = 'Date,Time,Exercise,Duration (seconds),Reps,Calories,Form Score,Completed,Target Reps\n';
-  const csvRows = workoutHistory.map(workout => {
+  const csvRows = validWorkouts.map(workout => {
     const date = new Date(workout.startTime);
     const dateStr = date.toLocaleDateString();
     const timeStr = date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
     
     // Ensure all data is properly formatted and sanitized
     const exerciseName = (workout.exerciseName || 'Unknown').replace(/,/g, ';');
-    const duration = workout.duration || 0;
-    const reps = workout.reps || 0;
-    const calories = workout.calories || 0;
-    const formScore = workout.formScore || 0;
+    const duration = Math.round(workout.duration) || 0;
+    const reps = Math.round(workout.reps) || 0;
+    const calories = Math.round(workout.calories * 10) / 10 || 0;
+    const formScore = Math.round(workout.formScore) || 0;
     const completed = workout.completed ? 'Yes' : 'No';
-    const targetReps = workout.targetReps || 0;
+    const targetReps = Math.round(workout.targetReps) || 0;
     
     return `${dateStr},${timeStr},${exerciseName},${duration},${reps},${calories},${formScore},${completed},${targetReps}`;
   }).join('\n');
@@ -1092,7 +1148,7 @@ function exportWorkoutHistory() {
     URL.revokeObjectURL(url); // Clean up
   }
   
-  speak('Workout history exported successfully.');
+  speak(`Exported ${validWorkouts.length} valid workouts successfully.`);
 }
 
 function loadUserStats() {
@@ -1700,6 +1756,9 @@ function resetSession() {
 
   workoutState = camera ? 'preparing' : 'idle';
   
+  // Reset enhanced rep validation
+  resetRepValidation();
+  
   // Don't reset program if we're following one
   if (!isFollowingProgram) {
     currentProgram = null;
@@ -1826,6 +1885,34 @@ function speak(text) {
 
   window.speechSynthesis.speak(utter);
 }
+
+// Welcome page functions
+function showWelcomePage() {
+  welcomePage.style.display = 'flex';
+  document.querySelector('.app > .header').style.display = 'none';
+  document.querySelector('.app > .main').style.display = 'none';
+  document.querySelector('.app > .footer').style.display = 'none';
+}
+
+function hideWelcomePage() {
+  welcomePage.style.display = 'none';
+  document.querySelector('.app > .header').style.display = 'block';
+  document.querySelector('.app > .main').style.display = 'flex';
+  document.querySelector('.app > .footer').style.display = 'block';
+}
+
+// Welcome page event listeners
+startTrainingBtn.addEventListener('click', () => {
+  hideWelcomePage();
+  updateFeedback("Welcome to FitTracker AI!", "Choose an exercise and start your journey!", "fas fa-rocket");
+  speak("Welcome to FitTracker AI! Your personal trainer is ready to help you achieve your fitness goals! Choose an exercise and let's get started!");
+});
+
+viewExercisesBtn.addEventListener('click', () => {
+  hideWelcomePage();
+  updateFeedback("Exercise Selection", "Browse through our available exercises and find your perfect workout!", "fas fa-list");
+  speak("Here are all the available exercises. Choose one that suits your fitness goals!");
+});
 
 // Event listeners
 startButton.addEventListener('click', startWorkoutFlow);
@@ -1954,6 +2041,9 @@ if (window.speechSynthesis) {
 }
 
 // Initialize
+// Show welcome page on load
+showWelcomePage();
+
 updateFeedback("Welcome to FitTracker AI", "Choose an exercise and start your journey!", "fas fa-rocket");
 speak("Welcome to FitTracker AI! Your personal trainer is ready to help you achieve your fitness goals! Choose an exercise and let's get started!");
 
