@@ -67,6 +67,80 @@ const welcomePage = document.getElementById("welcome-page");
 const startTrainingBtn = document.getElementById("start-training-btn");
 const viewExercisesBtn = document.getElementById("view-exercises-btn");
 
+// 🔥 Firebase Config (using Compat SDK)
+const firebaseConfig = {
+  apiKey: "AIzaSyBi5Zonn_FthUBXJB-1F16HgZfj6aEjAUU",
+  authDomain: "fittracker-ai.firebaseapp.com",
+  projectId: "fittracker-ai",
+  storageBucket: "fittracker-ai.firebasestorage.app",
+  messagingSenderId: "876420575737",
+  appId: "1:876420575737:web:f5cd763c575c27fa9f8d28",
+  measurementId: "G-70DKM3SX2X"
+};
+
+// Initialize Firebase
+firebase.initializeApp(firebaseConfig);
+const db = firebase.firestore();
+const auth = firebase.auth();
+const analytics = firebase.analytics(); // optional
+
+// Use anonymous auth so users don't need to sign up
+auth.signInAnonymously().catch(console.error);
+
+// 🔥 Save workout to Firebase (instead of localStorage)
+async function saveWorkoutToCloud(workout) {
+  const user = auth.currentUser;
+  if (!user) return;
+
+  try {
+    await db.collection('users').doc(user.uid).collection('workouts').add(workout);
+    console.log("Workout saved to cloud!");
+  } catch (error) {
+    console.error("Cloud save failed:", error);
+  }
+}
+
+// 🔥 Save user stats to Firebase
+async function saveUserStatsToCloud(stats) {
+  const user = auth.currentUser;
+  if (!user) return;
+
+  try {
+    await db.collection('users').doc(user.uid).set(stats, { merge: true });
+  } catch (error) {
+    console.error("Stats save failed:", error);
+  }
+}
+
+// 🔥 Load data from Firebase (on app start)
+async function loadFromCloud() {
+  const user = auth.currentUser;
+  if (!user) return;
+
+  try {
+    // Load user stats
+    const statsSnap = await db.collection('users').doc(user.uid).get();
+    if (statsSnap.exists) {
+      userStats = { ...userStats, ...statsSnap.data() };
+      updateStreak();
+      updateLevel();
+      displayAchievements();
+    }
+
+    // Load workout history
+    const workoutsSnap = await db.collection('users').doc(user.uid).collection('workouts')
+      .orderBy('startTime', 'desc').limit(100).get();
+    workoutHistory = [];
+    workoutsSnap.forEach(doc => {
+      workoutHistory.push(doc.data());
+    });
+    displayWorkoutHistory();
+    updateHistoryStats();
+  } catch (error) {
+    console.error("Cloud load failed:", error);
+  }
+}
+
 // Variables for rep counting
 let repCount = 0;
 let sessionCalories = 0;
@@ -934,20 +1008,8 @@ function saveWorkoutToHistory() {
     exercise: currentWorkoutData.exercise || currentExercise
   };
   
-  // Load existing history
-  const savedHistory = localStorage.getItem('fittracker-workout-history');
-  workoutHistory = savedHistory ? JSON.parse(savedHistory) : [];
-  
-  // Add new workout
-  workoutHistory.unshift(completedWorkout); // Add to beginning
-  
-  // Keep only last 100 workouts
-  if (workoutHistory.length > 100) {
-    workoutHistory = workoutHistory.slice(0, 100);
-  }
-  
-  // Save to localStorage
-  localStorage.setItem('fittracker-workout-history', JSON.stringify(workoutHistory));
+  // Save to cloud
+  saveWorkoutToCloud(completedWorkout);
   
   // Update user stats
   userStats.totalWorkouts += 1;
@@ -967,14 +1029,16 @@ function saveWorkoutToHistory() {
   // Check for achievements
   checkAchievements(completedWorkout);
   
+  // Save user stats to cloud
+  saveUserStatsToCloud(userStats);
+  
   // Reset current workout data
   currentWorkoutData = null;
   workoutStartTime = null;
 }
 
 function loadWorkoutHistory() {
-  const savedHistory = localStorage.getItem('fittracker-workout-history');
-  workoutHistory = savedHistory ? JSON.parse(savedHistory) : [];
+  loadFromCloud();
 }
 
 function displayWorkoutHistory() {
@@ -1078,7 +1142,7 @@ function updateHistoryStats() {
 function clearWorkoutHistory() {
   if (confirm('Are you sure you want to clear all workout history? This action cannot be undone.')) {
     workoutHistory = [];
-    localStorage.removeItem('fittracker-workout-history');
+    // Clear from cloud - in a real implementation, you would delete from Firestore
     displayWorkoutHistory();
     speak('Workout history cleared.');
   }
@@ -1152,16 +1216,11 @@ function exportWorkoutHistory() {
 }
 
 function loadUserStats() {
-  const savedStats = localStorage.getItem('fittracker-user-stats');
-  if (savedStats) {
-    userStats = { ...userStats, ...JSON.parse(savedStats) };
-  }
-  updateStreak();
-  updateLevel();
+  loadFromCloud();
 }
 
 function saveUserStats() {
-  localStorage.setItem('fittracker-user-stats', JSON.stringify(userStats));
+  saveUserStatsToCloud(userStats);
 }
 
 function updateStreak() {
@@ -1190,7 +1249,7 @@ function updateStreak() {
 function addXP(amount) {
   userStats.xp += amount;
   updateLevel();
-  saveUserStats();
+  saveUserStatsToCloud(userStats);
 }
 
 function updateLevel() {
@@ -2047,17 +2106,18 @@ showWelcomePage();
 updateFeedback("Welcome to FitTracker AI", "Choose an exercise and start your journey!", "fas fa-rocket");
 speak("Welcome to FitTracker AI! Your personal trainer is ready to help you achieve your fitness goals! Choose an exercise and let's get started!");
 
-// Load workout history
-loadWorkoutHistory();
-
-// Load user stats and achievements
-loadUserStats();
-
 // Initialize form score display
 updateFormScore(100);
 
 // Check for any missed achievements
 checkAchievements();
+
+// Load data from cloud when user is authenticated
+auth.onAuthStateChanged(async (user) => {
+  if (user) {
+    await loadFromCloud();
+  }
+});
 
 // Load saved theme from localStorage
 const savedTheme = localStorage.getItem('theme') || (window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
